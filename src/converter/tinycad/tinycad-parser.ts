@@ -40,6 +40,7 @@ export interface TinyCadSymbolDef {
 	refPrefix: string;
 	description: string;
 	ppp: number;
+	refPoint: TinyCadPoint;
 	shapes: TinyCadShape[];
 	pins: TinyCadPin[];
 }
@@ -73,6 +74,20 @@ export interface TinyCadNetLabel {
 	direction: number;
 }
 
+export interface TinyCadPower {
+	pos: TinyCadPoint;
+	text: string;
+	direction: number;
+	which: number;
+}
+
+export interface TinyCadText {
+	pos: TinyCadPoint;
+	text: string;
+	direction: number;
+	color: string;
+}
+
 export interface TinyCadSheet {
 	name: string;
 	width: number;
@@ -83,6 +98,9 @@ export interface TinyCadSheet {
 	buses: TinyCadBus[];
 	junctions: TinyCadJunction[];
 	netLabels: TinyCadNetLabel[];
+	powers: TinyCadPower[];
+	texts: TinyCadText[];
+	noconnects: TinyCadPoint[];
 }
 
 function parsePoint(raw: string): TinyCadPoint {
@@ -133,6 +151,18 @@ function parseSymbolDef(el: Element): TinyCadSymbolDef {
 					style: attrString(child, 'style', '0'),
 					fill: attrString(child, 'fill', '0'),
 				});
+			} else if (tag === 'NOTE_TEXT') {
+				// NOTE_TEXT: 符号内的引脚名标签(如 NLAS4501 的 COM/NO/GND/VCC)，属性 a="x,y" 是起点。
+				// 此前未解析，导致芯片引脚名丢失。作为 label 形状输出。
+				shapes.push({
+					type: 'label',
+					pos: parsePoint(attrString(child, 'a', '0,0')),
+					text: child.textContent?.trim() ?? '',
+					direction: attrNumber(child, 'direction', 0),
+					font: attrString(child, 'font', '0'),
+					color: attrString(child, 'color', '000000'),
+					style: attrString(child, 'style', '0'),
+				});
 			} else if (tag === 'LABEL') {
 				shapes.push({
 					type: 'label',
@@ -157,12 +187,17 @@ function parseSymbolDef(el: Element): TinyCadSymbolDef {
 		}
 	}
 
+	// REF_POINT: 符号的参考原点。SYMBOL 文档内所有坐标必须减去此值（相对原点存储）。
+	const refPointEl = el.querySelector(':scope > REF_POINT') || innerTinyCad?.querySelector('REF_POINT');
+	const refPoint = refPointEl ? parsePoint(attrString(refPointEl, 'pos', '0,0')) : { x: 0, y: 0 };
+
 	return {
 		id: attrString(el, 'id', ''),
 		name: childText(el, 'NAME'),
 		refPrefix: childText(el, 'REF'),
 		description: childText(el, 'DESCRIPTION'),
 		ppp: parseInt(childText(el, 'PPP') || '1', 10) || 1,
+		refPoint,
 		shapes,
 		pins,
 	};
@@ -171,9 +206,12 @@ function parseSymbolDef(el: Element): TinyCadSymbolDef {
 function parseSymbolInstance(el: Element): TinyCadSymbolInstance {
 	const fields: TinyCadField[] = [];
 	for (const field of Array.from(el.querySelectorAll(':scope > FIELD'))) {
+		// TinyCAD 的 FIELD 有两种写法：属性形式 <FIELD description="Ref" value="U1"/>
+		// （实际 .dsn 样本采用）与子元素形式 <FIELD><DESCRIPTION>..</DESCRIPTION>..</FIELD>
+		// （格式文档示例）。优先读属性，缺失时再回退到子元素，兼容两种。
 		fields.push({
-			description: childText(field, 'DESCRIPTION'),
-			value: childText(field, 'VALUE'),
+			description: attrString(field, 'description', '') || childText(field, 'DESCRIPTION'),
+			value: attrString(field, 'value', '') || childText(field, 'VALUE'),
 			show: attrString(field, 'show', '0'),
 			pos: parsePoint(attrString(field, 'pos', '0,0')),
 		});
@@ -196,9 +234,16 @@ export function parseTinyCadDsn(xmlText: string): TinyCadSheet {
 		throw new Error('TinyCAD XML parse error: ' + parserError.textContent);
 	}
 
-	const root = doc.querySelector('TinyCADSheets > TinyCAD');
+	// 兼容两种根结构（实测用户真实文件即第二种）：
+	//   ① 标准：<TinyCADSheets><TinyCAD>...</TinyCAD></TinyCADSheets>
+	//   ② 裸根：<TinyCAD>...</TinyCAD>（无 TinyCADSheets 包裹，部分 TinyCAD 导出变体/清洗脚本会产生）
+	// 此前只认 ①，遇到 ② 直接抛错，导致导线/元件图形在解析第一步就全丢。
+	let root = doc.querySelector('TinyCADSheets > TinyCAD');
 	if (!root) {
-		throw new Error('TinyCAD: missing <TinyCADSheets><TinyCAD> root');
+		root = doc.querySelector('TinyCAD');
+	}
+	if (!root) {
+		throw new Error('TinyCAD: missing <TinyCAD> root element');
 	}
 
 	const sheetName = childText(root, 'NAME') || 'Sheet 1';
@@ -249,6 +294,34 @@ export function parseTinyCadDsn(xmlText: string): TinyCadSheet {
 		});
 	}
 
+	// 电源符号: <POWER pos="42,200" which="0" direction="1">GND</POWER>
+	const powers: TinyCadPower[] = [];
+	for (const pwr of Array.from(root.querySelectorAll(':scope > POWER'))) {
+		powers.push({
+			pos: parsePoint(attrString(pwr, 'pos', '0,0')),
+			text: pwr.textContent?.trim().split('<')[0] ?? '',
+			direction: attrNumber(pwr, 'direction', 0),
+			which: attrNumber(pwr, 'which', 0),
+		});
+	}
+
+	// 文字标注: <TEXT pos="100,200" direction="0" color="000000">文字内容</TEXT>
+	const texts: TinyCadText[] = [];
+	for (const txt of Array.from(root.querySelectorAll(':scope > TEXT'))) {
+		texts.push({
+			pos: parsePoint(attrString(txt, 'pos', '0,0')),
+			text: txt.textContent?.trim() ?? '',
+			direction: attrNumber(txt, 'direction', 0),
+			color: attrString(txt, 'color', '000000'),
+		});
+	}
+
+	// 不连接标记: <NOCONNECT pos="100,200"/>
+	const noconnects: TinyCadPoint[] = [];
+	for (const nc of Array.from(root.querySelectorAll(':scope > NOCONNECT'))) {
+		noconnects.push(parsePoint(attrString(nc, 'pos', '0,0')));
+	}
+
 	return {
 		name: sheetName,
 		width,
@@ -259,5 +332,8 @@ export function parseTinyCadDsn(xmlText: string): TinyCadSheet {
 		buses,
 		junctions,
 		netLabels,
+		powers,
+		texts,
+		noconnects,
 	};
 }

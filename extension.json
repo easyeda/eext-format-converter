@@ -3,7 +3,7 @@
 	"uuid": "d16ec4f7259c47fda39f9183547c52d5",
 	"displayName": "格式转换",
 	"description": "支持导入 Xpedition、Cadstar、Fabmaster、P-CAD、Allegro、gEDA、TinyCAD 等格式与嘉立创EDA专业版互转，并支持导出 Xpedition、KiCad",
-	"version": "1.0.3",
+	"version": "1.7.3",
 	"publisher": "EasyEDA",
 	"engines": {
 		"eda": ">=3.0.0"
